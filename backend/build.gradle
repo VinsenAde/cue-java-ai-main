@@ -9,7 +9,7 @@ version = '0.0.1-SNAPSHOT'
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(17)
+        languageVersion = JavaLanguageVersion.of(21)
     }
 }
 
@@ -27,7 +27,7 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-security'
     implementation 'org.springframework.boot:spring-boot-starter-thymeleaf'
-
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
     // Spring AI (Ollama)
     implementation 'org.springframework.ai:spring-ai-ollama-spring-boot-starter'
 
@@ -35,10 +35,9 @@ dependencies {
     implementation 'org.springframework.security:spring-security-core'
     implementation 'org.springframework.security:spring-security-web'
     implementation 'org.springframework.security:spring-security-config'
-
+    implementation 'org.postgresql:postgresql:42.7.3'
     // Databases
-    runtimeOnly 'com.mysql:mysql-connector-j'
-    runtimeOnly 'com.h2database:h2:2.1.214'
+    runtimeOnly 'org.postgresql:postgresql:42.7.3'
 
     // Thymeleaf (if using templates)
     implementation 'org.springframework.boot:spring-boot-starter-thymeleaf'
@@ -52,15 +51,7 @@ dependencies {
     // Testing
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-
-//register
-implementation 'org.springframework.boot:spring-boot-starter-validation'
-
 }
-
-
-
-
 
 dependencyManagement {
     imports {
