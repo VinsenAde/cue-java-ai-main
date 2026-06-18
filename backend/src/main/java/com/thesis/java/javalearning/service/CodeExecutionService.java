@@ -1,153 +1,345 @@
-package com.thesis.java.javalearning.service;
+        package com.thesis.java.javalearning.service;
 
-import com.thesis.java.javalearning.dto.CodeResult;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
+    import com.thesis.java.javalearning.dto.CodeResult;
+    import com.thesis.java.javalearning.dto.ExecutionRequest;
+    import com.thesis.java.javalearning.dto.ExecutionResponse;
 
-import java.io.*;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Duration;
-import java.util.Map;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.stereotype.Service;
 
-@Service
-public class CodeExecutionService {
+    import java.io.*;
+    import java.nio.file.Files;
+    import java.nio.file.Path;
+    import java.nio.file.Paths;
+    import java.time.Duration;
+    import java.util.Map;
+    import java.util.UUID;
 
-    private static final String CLASS_NAME = "StudentCode";
-    private static final String JAVA_FILE = CLASS_NAME + ".java";
+    @Service
+    public class CodeExecutionService {
 
-    @Autowired
-    private ScoringService scoringService;
+        private static final String CLASS_NAME = "StudentCode";
+        private static final String JAVA_FILE = CLASS_NAME + ".java";
 
-    public CodeResult executeAndEvaluate(
-            String code,
-            String expectedOutput,
-            Map<String, Integer> hintCounts,
-            int failedRuns,
-            long elapsedMillis,
-            long timeLimitMillis,
-            String hintLevelCap,
-            String userInput,
-            long onTaskTimeSeconds,   // Added parameter
-            long offTaskTimeSeconds   // Added parameter
-    ) {
-        CodeResult result = new CodeResult();
-        try {
-            if (isLikelyHardcoded(code)) {
-                return new CodeResult(
-                        false,
-                        "⚠ Output terlihat seperti hardcoded. Gunakan variabel, perhitungan, atau struktur logika seperti if/for/Scanner.",
+        @Autowired
+        private ScoringService scoringService;
+
+        public CodeResult executeAndEvaluate(
+                String code,
+                String expectedOutput,
+                Map<String, Integer> hintCounts,
+                int failedRuns,
+                long elapsedMillis,
+                long timeLimitMillis,
+                String hintLevelCap,
+                String userInput,
+                long onTaskTimeSeconds,   // Added parameter
+                long offTaskTimeSeconds   // Added parameter
+        ) {
+            CodeResult result = new CodeResult();
+            try {
+                if (isLikelyHardcoded(code)) {
+                    return new CodeResult(
+                            false,
+                            "⚠ Output terlihat seperti hardcoded. Gunakan variabel, perhitungan, atau struktur logika seperti if/for/Scanner.",
+                            0,
+                            failedRuns + 1,
+                            "Kode tidak valid – terlalu hardcoded"
+                    );
+                }
+
+                // 1. write source to temp dir
+                Path tempDir = Files.createTempDirectory("java_exec_");
+                File javaFile = new File(tempDir.toFile(), JAVA_FILE);
+                String snippet = code.trim();
+                boolean hasClass = snippet.contains("class ");
+                String source = hasClass
+                    ? snippet
+                    : """
+                        public class %s {
+                        public static void main(String[] args) {
+                            %s
+                        }
+                        }
+                        """.formatted(CLASS_NAME, snippet);
+                Files.writeString(javaFile.toPath(), source);
+
+                // 2. compile
+                Process compile = new ProcessBuilder("javac", JAVA_FILE)
+                        .directory(tempDir.toFile())
+                        .redirectErrorStream(true)
+                        .start();
+                String compileOut = readProcessOutput(compile);
+                if (compile.waitFor() != 0) {
+                    return new CodeResult(false,
+                        "Compilation Error:\n" + compileOut,
                         0,
                         failedRuns + 1,
-                        "Kode tidak valid – terlalu hardcoded"
-                );
-            }
+                        "❌ Compilation failed."
+                    );
+                }
 
-            // 1. write source to temp dir
-            Path tempDir = Files.createTempDirectory("java_exec_");
-            File javaFile = new File(tempDir.toFile(), JAVA_FILE);
-            String snippet = code.trim();
-            boolean hasClass = snippet.contains("class ");
-            String source = hasClass
-                ? snippet
-                : """
-                    public class %s {
-                      public static void main(String[] args) {
-                        %s
-                      }
+                // 3. run program
+                Process run = new ProcessBuilder("java", "-cp", ".", CLASS_NAME)
+                        .directory(tempDir.toFile())
+                        .redirectErrorStream(true)
+                        .start();
+                if (userInput != null && !userInput.isBlank()) {
+                    try (OutputStream os = run.getOutputStream()) {
+                        os.write(userInput.getBytes());
+                        os.flush();
                     }
-                    """.formatted(CLASS_NAME, snippet);
-            Files.writeString(javaFile.toPath(), source);
+                }
+                String runOut = readProcessOutput(run);
+                int runExit = run.waitFor();
 
-            // 2. compile
-            Process compile = new ProcessBuilder("javac", JAVA_FILE)
-                    .directory(tempDir.toFile())
-                    .redirectErrorStream(true)
-                    .start();
-            String compileOut = readProcessOutput(compile);
-            if (compile.waitFor() != 0) {
-                return new CodeResult(false,
-                    "Compilation Error:\n" + compileOut,
-                    0,
-                    failedRuns + 1,
-                    "❌ Compilation failed."
+                // normalize line-endings and trim
+                String actualNorm = runOut == null
+                    ? ""
+                    : runOut.replace("\r\n", "\n").trim();
+                String expectNorm = expectedOutput == null
+                    ? ""
+                    : expectedOutput.replace("\r\n", "\n").trim();
+                boolean passed = actualNorm.equals(expectNorm);
+
+                // 4. score calculation
+                int score = scoringService.calculateScore(
+                        hintCounts,
+                        failedRuns,
+    //                    Duration.ofMillis(elapsedMillis),
+                        hintLevelCap,
+                        onTaskTimeSeconds,   // Passed new parameter
+                        offTaskTimeSeconds   // Passed new parameter
                 );
+                if (score > 100) score = 100;
+
+                // 5. populate result
+                result.setSuccess(runExit == 0 && passed);
+                result.setOutput(actualNorm);
+                result.setScore(score);
+                result.setFailedRuns(result.isSuccess() ? failedRuns : failedRuns + 1);
+                result.setFeedbackMessage(passed
+                    ? "✅ Output matches expected. You can now Submit."
+                    : "❌ Submission failed: your output doesn’t match expected."
+                );
+
+            } catch (Exception e) {
+                result.setSuccess(false);
+                result.setOutput("Execution Error:\n" + e.getMessage());
+                result.setScore(0);
+                result.setFailedRuns(failedRuns + 1);
+                result.setFeedbackMessage("❌ Error during execution.");
+            }
+            return result;
+        }
+
+        private String readProcessOutput(Process process) throws IOException {
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()))) {
+                StringBuilder output = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append("\n");
+                }
+                return output.toString();
+            }
+        }
+
+        private boolean isLikelyHardcoded(String code) {
+            String noWhitespace = code.replaceAll("\\s+", "").toLowerCase();
+            boolean hasOnlyPrint =
+                    noWhitespace.matches(".*system\\.out\\.print(ln)?\\([\"'].*[\"']\\).*") &&
+                    !noWhitespace.matches(".*(int|double|boolean|float|scanner|if|for|while|switch|catch|try|math|\\+|\\-|\\*|/|%).*");
+            return hasOnlyPrint;
+        }
+
+    public ExecutionResponse execute(ExecutionRequest request) {
+
+        ExecutionResponse response = new ExecutionResponse();
+
+        try {
+
+            /*
+            * STEP 1
+            * Create temporary workspace
+            *
+            * Example:
+            * C:/Users/Ade/AppData/Local/Temp/submission-12345
+            */
+            Path tempDir = Paths.get(
+                "/submissions",
+                UUID.randomUUID().toString()
+            );
+
+            Files.createDirectories(tempDir);
+
+            String hostPath =
+                "D:/cue-submissions/" +
+                tempDir.getFileName().toString();
+            /*
+            * STEP 2
+            * Write student source code
+            */
+            Path sourceFile = tempDir.resolve("Main.java");
+
+            Files.writeString(
+                    sourceFile,
+                    request.getSourceCode()
+            );
+            System.out.println("SOURCE CONTENT:");
+            System.out.println(Files.readString(sourceFile));
+            System.out.println("SOURCE FILE EXISTS: " + Files.exists(sourceFile));
+            System.out.println("SOURCE FILE SIZE: " + Files.size(sourceFile));
+            /*
+            * STEP 3
+            * Windows Docker volume fix
+            *
+            * Docker prefers forward slashes
+            */
+            String dockerVolume =
+                    tempDir.toAbsolutePath()
+                            .toString()
+                            .replace("\\", "/");
+
+            /*
+            * STEP 4
+            * Launch sandbox container
+            */
+            
+            ProcessBuilder pb = new ProcessBuilder(
+
+                    "docker",
+                    "run",
+
+                    "--rm",
+
+                    "--network",
+                    "none",
+
+                    "--memory",
+                    "256m",
+
+                    "--cpus",
+                    "0.5",
+
+                    "--pids-limit",
+                    "20",
+
+                    "-v",
+                    hostPath + ":/sandbox",
+
+                    "cue-java-runner",
+
+                    "sh",
+                    "-c",
+
+                    /*
+                    * Compile
+                    * Execute
+                    *
+                    * JVM limited to 128 MB
+                    */
+                    "mkdir -p /tmp/build && javac -d /tmp/build /sandbox/Main.java && java -cp /tmp/build Main"
+            );
+
+            /*
+            * Merge stdout + stderr
+            *
+            * Compilation errors become visible
+            */
+            pb.redirectErrorStream(true);
+
+            //COLLECT EVIDENCE
+
+            System.out.println("=================================");
+            System.out.println("HOST PATH = " + hostPath);
+            System.out.println("TEMP DIR: " + tempDir.toAbsolutePath());
+            System.out.println("SOURCE FILE: " + sourceFile.toAbsolutePath());
+            System.out.println("FILE EXISTS: " + Files.exists(sourceFile));
+            System.out.println("DOCKER VOLUME: " + dockerVolume);
+            System.out.println("=================================");
+
+            System.out.println("DOCKER COMMAND:");
+            System.out.println(pb.command());
+            Process process = pb.start();
+
+            /*
+            * STEP 5
+            * Prevent infinite loops
+            */
+            boolean finished =
+                    process.waitFor(
+                            20,
+                            java.util.concurrent.TimeUnit.SECONDS
+                    );
+
+            if (!finished) {
+
+                System.out.println("PROCESS STILL RUNNING AFTER 20 SECONDS");
+
+                process.destroyForcibly();
+
+                response.setStatus("TIMEOUT");
+
+                response.setOutput(
+                        "Execution exceeded 20 second limit."
+                );
+
+                return response;
             }
 
-            // 3. run program
-            Process run = new ProcessBuilder("java", "-cp", ".", CLASS_NAME)
-                    .directory(tempDir.toFile())
-                    .redirectErrorStream(true)
-                    .start();
-            if (userInput != null && !userInput.isBlank()) {
-                try (OutputStream os = run.getOutputStream()) {
-                    os.write(userInput.getBytes());
-                    os.flush();
+            /*
+            * STEP 6
+            * Read container output
+            */
+            StringBuilder output = new StringBuilder();
+
+            try (
+                    BufferedReader reader =
+                            new BufferedReader(
+                                    new InputStreamReader(
+                                            process.getInputStream()
+                                    )
+                            )
+            ) {
+
+                String line;
+
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append("\n");
                 }
             }
-            String runOut = readProcessOutput(run);
-            int runExit = run.waitFor();
 
-            // normalize line-endings and trim
-            String actualNorm = runOut == null
-                ? ""
-                : runOut.replace("\r\n", "\n").trim();
-            String expectNorm = expectedOutput == null
-                ? ""
-                : expectedOutput.replace("\r\n", "\n").trim();
-            boolean passed = actualNorm.equals(expectNorm);
+            /*
+            * STEP 7
+            * Return result
+            */
+            int exitCode = process.exitValue();
 
-            // 4. score calculation
-            int score = scoringService.calculateScore(
-                    hintCounts,
-                    failedRuns,
-//                    Duration.ofMillis(elapsedMillis),
-                    hintLevelCap,
-                    onTaskTimeSeconds,   // Passed new parameter
-                    offTaskTimeSeconds   // Passed new parameter
-            );
-            if (score > 100) score = 100;
-
-            // 5. populate result
-            result.setSuccess(runExit == 0 && passed);
-            result.setOutput(actualNorm);
-            result.setScore(score);
-            result.setFailedRuns(result.isSuccess() ? failedRuns : failedRuns + 1);
-            result.setFeedbackMessage(passed
-                ? "✅ Output matches expected. You can now Submit."
-                : "❌ Submission failed: your output doesn’t match expected."
+            response.setOutput(
+                    output.toString().trim()
             );
 
-        } catch (Exception e) {
-            result.setSuccess(false);
-            result.setOutput("Execution Error:\n" + e.getMessage());
-            result.setScore(0);
-            result.setFailedRuns(failedRuns + 1);
-            result.setFeedbackMessage("❌ Error during execution.");
-        }
-        return result;
-    }
+            response.setStatus(
+                    exitCode == 0
+                            ? "SUCCESS"
+                            : "FAILED"
+            );
 
-    private String readProcessOutput(Process process) throws IOException {
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(process.getInputStream()))) {
-            StringBuilder output = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
-            }
-            return output.toString();
         }
-    }
+        catch (Exception e) {
 
-    private boolean isLikelyHardcoded(String code) {
-        String noWhitespace = code.replaceAll("\\s+", "").toLowerCase();
-        boolean hasOnlyPrint =
-                noWhitespace.matches(".*system\\.out\\.print(ln)?\\([\"'].*[\"']\\).*") &&
-                !noWhitespace.matches(".*(int|double|boolean|float|scanner|if|for|while|switch|catch|try|math|\\+|\\-|\\*|/|%).*");
-        return hasOnlyPrint;
+            response.setStatus("ERROR");
+
+            response.setOutput(
+                    e.getMessage()
+            );
+        }
+
+        return response;
     }
-}
+        
+    }
 
 //package com.thesis.java.javalearning.service;
 //
